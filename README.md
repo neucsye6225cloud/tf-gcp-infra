@@ -1,5 +1,5 @@
 # tf-gcp-infra
 terraform google cloud infrastructure
 
-try to navigate to VPC networks
-enable compute engine API
+## Points to note
+Need to enable Compute Engine API in GCP for VPC provisioning
