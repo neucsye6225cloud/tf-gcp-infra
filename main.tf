@@ -23,5 +23,3 @@ resource "google_compute_route" "webapp_route" {
   dest_range           = "${var.webapp_subnet_dest_range}"
   next_hop_gateway     = "default-internet-gateway"
 }
-
- 
