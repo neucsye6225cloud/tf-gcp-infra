@@ -62,8 +62,7 @@ resource "google_compute_instance" "webapp_instance" {
 
   boot_disk {
     initialize_params {
-      # temporary adding exact image name replace with "csye6225-app-image"
-      image = "${var.project_id}/packer-1708531099"
+      image = "${var.project_id}/csye6225-app-image"
       size  = 100
       type  = "pd-balanced"
     }
