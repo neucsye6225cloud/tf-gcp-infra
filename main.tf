@@ -70,6 +70,9 @@ resource "google_compute_instance" "webapp_instance" {
   }
 
   network_interface {
+    access_config {
+      network_tier = "PREMIUM"
+    }
     network = google_compute_network.vpc.self_link
 
     subnetwork_project = var.project_id
