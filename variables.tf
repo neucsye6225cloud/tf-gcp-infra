@@ -22,11 +22,6 @@ variable "db_subnet_name" {
   description = "db"
 }
 
-// variable "subnet_cidr" {
-//   description = "CIDR block for the subnets"
-//   default     = "10.0.0.0/16"
-// }
-
 variable "webapp_subnet_cidr" {
   description = "CIDR block for the webapp subnet"
 }
@@ -46,3 +41,14 @@ variable "webapp_route_name" {
 variable "delete_default_route_name" {
   description = "name of route to delete default route"
 }
+
+variable "psc_name" {}
+variable "sql_instance_name" {}
+variable "db_tier" {}
+variable "db_version" {}
+variable "compute_instance_zone" {}
+variable "compute_instance_machine_type" {}
+variable "sql_db_instance_edition" {}
+variable "sql_instance_availability_type" {}
+variable "sql_instance_disk_type" {}
+variable "sql_instance_disk_size" {}
