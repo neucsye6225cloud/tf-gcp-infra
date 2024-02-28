@@ -1,4 +1,4 @@
-# local variables 
+# local variables
 locals {
   timestamp     = formatdate("DDMMMYYYYhhmm", timestamp())
   db_host       = google_sql_database_instance.cloudsql_instance.ip_address[0].ip_address
@@ -9,7 +9,7 @@ locals {
 resource "random_password" "password" {
   length           = 16
   special          = true
-  override_special = "!#$%&*()-_=+[]{}<>:?"
+  override_special = "#_"
 }
 
 resource "google_compute_network" "vpc" {
@@ -23,16 +23,18 @@ resource "google_compute_subnetwork" "webapp_subnet" {
   name          = var.webapp_subnet_name
   network       = google_compute_network.vpc.self_link
   ip_cidr_range = var.webapp_subnet_cidr
+  region        = var.region
 }
 
 resource "google_compute_subnetwork" "db_subnet" {
   name          = var.db_subnet_name
   network       = google_compute_network.vpc.self_link
   ip_cidr_range = var.db_subnet_cidr
+  region        = var.region
 }
 
 # a global address for private services access
-resource "google_compute_global_address" "private_service_access" {
+resource "google_compute_global_address" "private_ip_range" {
   name          = var.psc_name
   purpose       = "VPC_PEERING"
   address_type  = "INTERNAL"
@@ -45,8 +47,8 @@ resource "google_compute_global_address" "private_service_access" {
 resource "google_service_networking_connection" "private_service_connection" {
   network                 = google_compute_network.vpc.self_link
   service                 = "servicenetworking.googleapis.com"
-  reserved_peering_ranges = [google_compute_global_address.private_service_access.name]
-  depends_on              = [google_compute_global_address.private_service_access]
+  reserved_peering_ranges = [google_compute_global_address.private_ip_range.name]
+  depends_on              = [google_compute_global_address.private_ip_range]
 }
 
 resource "google_compute_route" "webapp_route" {
@@ -99,13 +101,13 @@ resource "google_sql_database_instance" "cloudsql_instance" {
     disk_size         = var.sql_instance_disk_size
 
     ip_configuration {
-      ipv4_enabled                                  = false
-      private_network                               = google_compute_network.vpc.self_link
-      enable_private_path_for_google_cloud_services = true
+      ipv4_enabled    = false
+      private_network = google_compute_network.vpc.self_link
+      #enable_private_path_for_google_cloud_services = true
     }
 
     backup_configuration {
-      enabled = true
+      enabled            = true
       binary_log_enabled = true
     }
   }
@@ -146,7 +148,7 @@ resource "google_compute_instance" "webapp_instance" {
 
   network_interface {
     access_config {
-      network_tier = "PREMIUM"
+      // network_tier = "PREMIUM"
     }
     network = google_compute_network.vpc.self_link
 
@@ -167,6 +169,10 @@ resource "google_compute_instance" "webapp_instance" {
   echo "SQL_INSTANCE=${google_sql_database_instance.cloudsql_instance.name}" >> ${local.env_file_path}
   sudo chown -R csye6225:csye6225 /tmp/webapp/webapp.env
   sudo chmod 644 /tmp/webapp/webapp.env
+
+  # indicator file to indicate the success of the startup script
+  touch /tmp/success-indicator-file
+  sudo systemctl restart csye6225.service
   EOF
 
   depends_on = [google_compute_network.vpc]
