@@ -52,3 +52,5 @@ variable "sql_db_instance_edition" {}
 variable "sql_instance_availability_type" {}
 variable "sql_instance_disk_type" {}
 variable "sql_instance_disk_size" {}
+variable "domain_name" {}
+variable "dns_managed_zone" {}
