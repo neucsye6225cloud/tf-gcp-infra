@@ -86,6 +86,23 @@ resource "google_compute_firewall" "webapp_firewall" {
   target_tags   = ["webapp"]
 }
 
+resource "google_service_account" "vm_service_account" {
+  account_id   = "vm-service-account"
+  display_name = "VM Service Account"
+}
+
+resource "google_project_iam_member" "logging_admin_binding" {
+  project = var.project_id
+  role    = "roles/logging.admin"
+  member  = "serviceAccount:${google_service_account.vm_service_account.email}"
+}
+
+resource "google_project_iam_member" "monitoring_metric_writer_binding" {
+  project = var.project_id
+  role    = "roles/monitoring.metricWriter"
+  member  = "serviceAccount:${google_service_account.vm_service_account.email}"
+}
+
 # a cloud SQL instance
 resource "google_sql_database_instance" "cloudsql_instance" {
   database_version    = var.db_version
@@ -173,12 +190,32 @@ resource "google_compute_instance" "webapp_instance" {
   # indicator file to indicate the success of the startup script
   touch /tmp/success-indicator-file
   sudo systemctl restart csye6225.service
+
   EOF
 
-  depends_on = [google_compute_network.vpc]
+  service_account {
+    email  = google_service_account.vm_service_account.email
+    scopes = ["cloud-platform"]
+  }
+
+  depends_on = [google_compute_network.vpc, google_service_account.vm_service_account]
+}
+
+resource "google_dns_record_set" "a" {
+  name         = "${var.domain_name}"
+  type         = "A"
+  ttl          = 300
+  managed_zone = var.dns_managed_zone
+
+  rrdatas = [google_compute_instance.webapp_instance.network_interface[0].access_config[0].nat_ip]
 }
 
 output "db_host" {
   value       = google_sql_database_instance.cloudsql_instance.ip_address[0]
   description = "IP address of the host running the Cloud SQL Database."
+}
+
+output "nat_ip" {
+  value       = google_compute_instance.webapp_instance.network_interface[0].access_config[0].nat_ip
+  description = "The public IP address of the webapp instance."
 }
