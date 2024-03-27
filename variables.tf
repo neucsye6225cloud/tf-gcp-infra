@@ -54,3 +54,9 @@ variable "sql_instance_disk_type" {}
 variable "sql_instance_disk_size" {}
 variable "domain_name" {}
 variable "dns_managed_zone" {}
+variable "gcf_cidr_range" {}
+variable "bucket_name" {}
+variable "object_name" {}
+variable "mailgun_api_key" {}
+variable "pubsub_topic" {}
+variable "mailgun_domain" {}
