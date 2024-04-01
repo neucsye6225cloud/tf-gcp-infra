@@ -19,6 +19,11 @@ resource "google_compute_network" "vpc" {
   delete_default_routes_on_create = true
 }
 
+resource "google_pubsub_topic" "verify_email" {
+  name                       = var.pubsub_topic
+  message_retention_duration = "86400s"
+}
+
 resource "google_compute_subnetwork" "webapp_subnet" {
   name          = var.webapp_subnet_name
   network       = google_compute_network.vpc.self_link
@@ -103,6 +108,18 @@ resource "google_project_iam_member" "monitoring_metric_writer_binding" {
   member  = "serviceAccount:${google_service_account.vm_service_account.email}"
 }
 
+resource "google_project_iam_member" "cloud_sql_editor_binding" {
+  project = var.project_id
+  role    = "roles/cloudsql.editor"
+  member  = "serviceAccount:${google_service_account.vm_service_account.email}"
+}
+
+resource "google_project_iam_member" "pubsub_publisher_binding" {
+  project = var.project_id
+  role    = "roles/pubsub.editor"
+  member  = "serviceAccount:${google_service_account.vm_service_account.email}"
+}
+
 # a cloud SQL instance
 resource "google_sql_database_instance" "cloudsql_instance" {
   database_version    = var.db_version
@@ -184,6 +201,7 @@ resource "google_compute_instance" "webapp_instance" {
   echo "DB_PASSWORD=${random_password.password.result}" >> ${local.env_file_path}
   echo "PROJECT_ID=${var.project_id}" >> ${local.env_file_path}
   echo "SQL_INSTANCE=${google_sql_database_instance.cloudsql_instance.name}" >> ${local.env_file_path}
+  echo "PUBSUB_TOPIC=${google_pubsub_topic.verify_email.name}" >> ${local.env_file_path}
   sudo chown -R csye6225:csye6225 /tmp/webapp/webapp.env
   sudo chmod 644 /tmp/webapp/webapp.env
 
@@ -202,12 +220,93 @@ resource "google_compute_instance" "webapp_instance" {
 }
 
 resource "google_dns_record_set" "a" {
-  name         = "${var.domain_name}"
+  name         = var.domain_name
   type         = "A"
   ttl          = 300
   managed_zone = var.dns_managed_zone
 
   rrdatas = [google_compute_instance.webapp_instance.network_interface[0].access_config[0].nat_ip]
+}
+
+
+
+
+resource "google_pubsub_subscription" "email_verification" {
+  name  = "email-verification"
+  topic = google_pubsub_topic.verify_email.id
+
+  message_retention_duration = "600s"
+  retain_acked_messages      = true
+
+  ack_deadline_seconds = 20
+
+  retry_policy {
+    minimum_backoff = "10s"
+  }
+  project                 = var.project_id
+  enable_message_ordering = false
+}
+
+resource "google_pubsub_topic_iam_binding" "binding" {
+  project = var.project_id
+  topic   = google_pubsub_topic.verify_email.name
+  role    = "roles/viewer"
+  members = [
+    "serviceAccount:${google_service_account.vm_service_account.email}",
+  ]
+}
+
+resource "google_vpc_access_connector" "connector" {
+  name           = "vpc-connector"
+  region         = var.region
+  network        = google_compute_network.vpc.self_link
+  ip_cidr_range  = var.gcf_cidr_range
+  min_throughput = 200
+  max_throughput = 300
+}
+
+resource "google_cloudfunctions2_function" "default" {
+  name        = "send-verification-email"
+  location    = var.region
+  description = "a new function"
+
+  build_config {
+    runtime     = "python39"
+    entry_point = "send_email"
+    source {
+      storage_source {
+        bucket = var.bucket_name
+        object = var.object_name
+      }
+    }
+  }
+
+  service_config {
+    max_instance_count = 1
+    min_instance_count = 0
+    available_memory   = "256M"
+    timeout_seconds    = 60
+
+    environment_variables = {
+      MAILGUN_API_KEY = "${var.mailgun_api_key}"
+      MAILGUN_DOMAIN  = "${var.mailgun_domain}"
+      DB_HOST         = "${local.db_host}"
+      DB_USER         = "${google_sql_user.db_user.name}"
+      DB_PASSWORD     = "${random_password.password.result}"
+      DB_DATABASE     = "${google_sql_database.database.name}"
+    }
+    vpc_connector         = google_vpc_access_connector.connector.id
+    service_account_email = google_service_account.vm_service_account.email
+  }
+
+  event_trigger {
+    trigger_region = var.region
+    event_type     = "google.cloud.pubsub.topic.v1.messagePublished"
+    pubsub_topic   = google_pubsub_topic.verify_email.id
+    retry_policy   = "RETRY_POLICY_RETRY"
+  }
+
+  depends_on = [google_vpc_access_connector.connector, google_sql_database_instance.cloudsql_instance]
 }
 
 output "db_host" {
