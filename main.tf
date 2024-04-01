@@ -114,6 +114,12 @@ resource "google_project_iam_member" "cloud_sql_editor_binding" {
   member  = "serviceAccount:${google_service_account.vm_service_account.email}"
 }
 
+resource "google_project_iam_member" "pubsub_publisher_binding" {
+  project = var.project_id
+  role    = "roles/pubsub.editor"
+  member  = "serviceAccount:${google_service_account.vm_service_account.email}"
+}
+
 # a cloud SQL instance
 resource "google_sql_database_instance" "cloudsql_instance" {
   database_version    = var.db_version
@@ -229,7 +235,7 @@ resource "google_pubsub_subscription" "email_verification" {
   name  = "email-verification"
   topic = google_pubsub_topic.verify_email.id
 
-  message_retention_duration = "120s"
+  message_retention_duration = "600s"
   retain_acked_messages      = true
 
   ack_deadline_seconds = 20
@@ -260,16 +266,13 @@ resource "google_vpc_access_connector" "connector" {
 }
 
 resource "google_cloudfunctions2_function" "default" {
-  name        = "sendVerificationEmail"
+  name        = "send-verification-email"
   location    = var.region
   description = "a new function"
 
   build_config {
     runtime     = "python39"
     entry_point = "send_email"
-    # environment_variables = {
-    #   BUILD_CONFIG_TEST = "build_test"
-    # }
     source {
       storage_source {
         bucket = var.bucket_name
@@ -285,17 +288,14 @@ resource "google_cloudfunctions2_function" "default" {
     timeout_seconds    = 60
 
     environment_variables = {
-      SERVICE_CONFIG_TEST = "config_test"
-      MAILGUN_API_KEY     = "${var.mailgun_api_key}"
-      MAILGUN_DOMAIN      = "${var.mailgun_domain}"
-      HOST                = "${google_sql_database_instance.cloudsql_instance.ip_address[0]}"
-      DB_USER             = "${google_sql_user.db_user.name}"
-      DB_PASSWORD         = "${random_password.password.result}"
-      DATABASE            = "${google_sql_database.database.name}"
+      MAILGUN_API_KEY = "${var.mailgun_api_key}"
+      MAILGUN_DOMAIN  = "${var.mailgun_domain}"
+      DB_HOST         = "${local.db_host}"
+      DB_USER         = "${google_sql_user.db_user.name}"
+      DB_PASSWORD     = "${random_password.password.result}"
+      DB_DATABASE     = "${google_sql_database.database.name}"
     }
-    vpc_connector = google_vpc_access_connector.connector.id
-    # ingress_settings               = "ALLOW_INTERNAL_ONLY"
-    # all_traffic_on_latest_revision = true
+    vpc_connector         = google_vpc_access_connector.connector.id
     service_account_email = google_service_account.vm_service_account.email
   }
 
@@ -305,9 +305,9 @@ resource "google_cloudfunctions2_function" "default" {
     pubsub_topic   = google_pubsub_topic.verify_email.id
     retry_policy   = "RETRY_POLICY_RETRY"
   }
+
+  depends_on = [google_vpc_access_connector.connector, google_sql_database_instance.cloudsql_instance]
 }
-
-
 
 output "db_host" {
   value       = google_sql_database_instance.cloudsql_instance.ip_address[0]
