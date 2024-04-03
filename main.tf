@@ -91,6 +91,48 @@ resource "google_compute_firewall" "webapp_firewall" {
   target_tags   = ["webapp"]
 }
 
+resource "google_compute_subnetwork" "proxy_only" {
+  name          = "proxy-only-subnet"
+  ip_cidr_range = "10.129.0.0/23"
+  network       = google_compute_network.vpc.id
+  purpose       = "REGIONAL_MANAGED_PROXY"
+  region        = "us-east1"
+  role          = "ACTIVE"
+}
+
+resource "google_compute_firewall" "default" {
+  name = "fw-allow-health-check"
+  allow {
+    protocol = "tcp"
+  }
+  direction     = "INGRESS"
+  network       = google_compute_network.vpc.id
+  priority      = 1000
+  source_ranges = ["130.211.0.0/22", "35.191.0.0/16"]
+  target_tags   = ["load-balanced-backend"]
+}
+
+resource "google_compute_firewall" "allow_proxy" {
+  name = "fw-allow-proxies"
+  allow {
+    ports    = ["443"]
+    protocol = "tcp"
+  }
+  allow {
+    ports    = ["80"]
+    protocol = "tcp"
+  }
+  allow {
+    ports    = ["8080"]
+    protocol = "tcp"
+  }
+  direction     = "INGRESS"
+  network       = google_compute_network.vpc.id
+  priority      = 1000
+  source_ranges = ["10.129.0.0/23"]
+  target_tags   = ["load-balanced-backend"]
+}
+
 resource "google_service_account" "vm_service_account" {
   account_id   = "vm-service-account"
   display_name = "VM Service Account"
@@ -163,12 +205,30 @@ resource "google_sql_user" "db_user" {
   project  = var.project_id
 }
 
+resource "google_compute_global_address" "default" {
+  provider = google-beta
+  name     = "l7-xlb-static-ip"
+}
+
+resource "google_compute_target_http_proxy" "default" {
+  name    = "l7-xlb-proxy"
+  region  = "us-west1"
+  url_map = google_compute_region_url_map.default.id
+}
+
+resource "google_compute_global_forwarding_rule" "default" {
+  name                  = "l7-xlb-forwarding-rule"
+  provider              = google-beta
+  ip_protocol           = "TCP"
+  load_balancing_scheme = "EXTERNAL"
+  target                = google_compute_target_http_proxy.default.id
+  ip_address            = google_compute_global_address.default.id
+}
+
 resource "google_compute_region_instance_template" "instance_template" {
   name        = "webapp-instance-template"
 
   tags = ["webapp"]
-
-
   machine_type         = var.compute_instance_machine_type
 
   // Create a new boot disk from an image
@@ -223,8 +283,7 @@ resource "google_compute_target_pool" "target_pool" {
   name = "instance-pool"
 
   instances = [
-    "us-central1-a/myinstance1",
-    "us-central1-b/myinstance2",
+    "${google_compute_region_instance_template.instance_template.self_link_unique}",
   ]
 
   health_checks = [
@@ -244,16 +303,16 @@ resource "google_compute_region_instance_group_manager" "appserver" {
     instance_template = google_compute_region_instance_template.instance_template.self_link_unique
   }
 
-  target_pools = [google_compute_target_pool.appserver.id]
+  target_pools = [google_compute_target_pool.target_pool.id]
   target_size  = 2
 
   named_port {
     name = "custom"
-    port = 8888
+    port = 5000
   }
 
   auto_healing_policies {
-    health_check      = google_compute_health_check.autohealing.id
+    health_check      = google_compute_health_check.http_health_check.id
     initial_delay_sec = 300
   }
 }
