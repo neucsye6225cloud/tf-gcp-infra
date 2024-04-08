@@ -91,6 +91,30 @@ resource "google_compute_firewall" "webapp_firewall" {
   target_tags   = ["webapp"]
 }
 
+// resource "google_compute_subnetwork" "proxy_only" {
+//   name          = "proxy-only-subnet"
+//   ip_cidr_range = "10.129.0.0/23"
+//   network       = google_compute_network.vpc.id
+//   purpose       = "REGIONAL_MANAGED_PROXY"
+//   region        = "us-east1"
+//   role          = "ACTIVE"
+// }
+
+resource "google_compute_firewall" "lb_firewall" {
+  name = "fw-allow-health-check"
+
+  allow {
+    protocol = "tcp"
+    ports    = ["80", "443", "8080", "5000"]
+  }
+
+  network       = google_compute_network.vpc.id
+  priority      = 1000
+  source_ranges = ["130.211.0.0/22", "35.191.0.0/16"]
+  target_tags   = ["load-balanced-backend"]
+}
+
+
 resource "google_service_account" "vm_service_account" {
   account_id   = "vm-service-account"
   display_name = "VM Service Account"
@@ -163,32 +187,29 @@ resource "google_sql_user" "db_user" {
   project  = var.project_id
 }
 
-# Compute Engine instance (VM)
-resource "google_compute_instance" "webapp_instance" {
-  name         = "webapp-instance"
+resource "google_compute_region_instance_template" "instance_template" {
+  name = "webapp-instance-template"
+
+  tags         = ["webapp"]
   machine_type = var.compute_instance_machine_type
-  zone         = var.compute_instance_zone
 
-  tags = ["webapp"]
-
-  boot_disk {
-    initialize_params {
-      image = "${var.project_id}/csye6225-app-image"
-      size  = 100
-      type  = "pd-balanced"
-    }
-    mode = "READ_WRITE"
+  // Create a new boot disk from an image
+  disk {
+    source_image      = "${var.project_id}/csye6225-app-image"
+    auto_delete       = true
+    boot              = true
+    mode              = "READ_WRITE"
+    disk_type         = "pd-balanced"
+    disk_size_gb      = 100
   }
 
   network_interface {
-    access_config {
-      // network_tier = "PREMIUM"
-    }
-    network = google_compute_network.vpc.self_link
-
     subnetwork_project = var.project_id
+    network            = google_compute_network.vpc.self_link
     subnetwork         = google_compute_subnetwork.webapp_subnet.name
     stack_type         = "IPV4_ONLY"
+    access_config {
+    }
   }
 
   metadata_startup_script = <<EOF
@@ -219,17 +240,194 @@ resource "google_compute_instance" "webapp_instance" {
   depends_on = [google_compute_network.vpc, google_service_account.vm_service_account]
 }
 
+resource "google_compute_health_check" "http_health_check" {
+  name        = var.compute_health_check_name
+  description = "Health check via http"
+
+  timeout_sec         = 1
+  check_interval_sec  = 1
+  healthy_threshold   = 4
+  unhealthy_threshold = 5
+
+  http_health_check {
+    port               = 5000
+    port_specification = "USE_FIXED_PORT"
+    request_path       = "/healthz"
+    proxy_header       = "NONE"
+    response           = "I AM HEALTHY"
+  }
+}
+
+// resource "google_compute_target_pool" "target_pool" {
+//   name = "instance-pool"
+
+//   instances = [
+//     "${google_compute_region_instance_template.instance_template.self_link_unique}",
+//   ]
+
+//   health_checks = [
+//     google_compute_health_check.http_health_check.name,
+//   ]
+// }
+
+resource "google_compute_region_instance_group_manager" "appserver" {
+  name = "appserver-igm"
+
+  base_instance_name        = "app"
+  region                    = var.region
+  distribution_policy_zones = ["us-east1-b"]
+
+  version {
+    name              = "appserver-canary"
+    instance_template = google_compute_region_instance_template.instance_template.id
+  }
+
+  // target_pools = [google_compute_target_pool.target_pool.id]
+  // target_size  = 2
+
+  named_port {
+    name = var.igm_port_name
+    port = 5000
+  }
+
+  auto_healing_policies {
+    health_check      = google_compute_health_check.http_health_check.id
+    initial_delay_sec = 300
+  }
+}
+
+resource "google_compute_region_autoscaler" "autoscaler" {
+  name   = "compute-region-autoscaler"
+  region = var.region
+  target = google_compute_region_instance_group_manager.appserver.id
+
+  autoscaling_policy {
+    max_replicas    = 5
+    min_replicas    = 1
+    cooldown_period = 60
+
+    cpu_utilization {
+      target = 0.5
+    }
+  }
+
+  depends_on = [google_compute_region_instance_group_manager.appserver]
+}
+
+resource "google_compute_managed_ssl_certificate" "ssl_cert" {
+  name = "test-cert"
+
+  managed {
+    domains = [var.mailgun_domain]
+  }
+}
+
+resource "google_compute_backend_service" "lb_backend_service" {
+  name      = "lb-backend-service"
+  protocol  = var.backend_protocol
+  port_name = var.igm_port_name
+
+  health_checks = [google_compute_health_check.http_health_check.id]
+
+  backend {
+    group = google_compute_region_instance_group_manager.appserver.instance_group
+  }
+
+  log_config {
+    enable = true
+  }
+}
+
+resource "google_compute_url_map" "demo_url_map" {
+  name            = "demo-url-map"
+  default_service = google_compute_backend_service.lb_backend_service.id
+}
+
+resource "google_compute_global_address" "default" {
+  name = "l7-xlb-static-ip"
+}
+
+resource "google_compute_target_https_proxy" "default" {
+  name             = "l7-xlb-proxy"
+  url_map          = google_compute_url_map.demo_url_map.id
+  ssl_certificates = [google_compute_managed_ssl_certificate.ssl_cert.id]
+}
+
+resource "google_compute_global_forwarding_rule" "https_forwarding_rule" {
+  name                  = "l7-xlb-forwarding-rule"
+  // ip_protocol           = "TCP"
+  // load_balancing_scheme = "EXTERNAL"
+  port_range            = "443"
+  target                = google_compute_target_https_proxy.default.id
+  ip_address            = google_compute_global_address.default.id
+}
+
+
+# Compute Engine instance (VM)
+// resource "google_compute_instance" "webapp_instance" {
+//   name         = "webapp-instance"
+//   machine_type = var.compute_instance_machine_type
+//   zone         = var.compute_instance_zone
+
+//   tags = ["webapp"]
+
+//   boot_disk {
+//     initialize_params {
+//       image = "${var.project_id}/csye6225-app-image"
+//       size  = 100
+//       type  = "pd-balanced"
+//     }
+//     mode = "READ_WRITE"
+//   }
+
+//   network_interface {
+//     access_config {
+//       // network_tier = "PREMIUM"
+//     }
+//     network = google_compute_network.vpc.self_link
+
+//     subnetwork_project = var.project_id
+//     subnetwork         = google_compute_subnetwork.webapp_subnet.name
+//     stack_type         = "IPV4_ONLY"
+//   }
+
+//   metadata_startup_script = <<EOF
+//   #!/bin/bash
+//   touch ${local.env_file_path}
+//   echo "DB_HOST=${local.db_host}" >> ${local.env_file_path}
+//   echo "DB_PORT=3306" >> ${local.env_file_path}
+//   echo "DB_NAME=${google_sql_database.database.name}" >> ${local.env_file_path}
+//   echo "DB_USER=${google_sql_user.db_user.name}" >> ${local.env_file_path}
+//   echo "DB_PASSWORD=${random_password.password.result}" >> ${local.env_file_path}
+//   echo "PROJECT_ID=${var.project_id}" >> ${local.env_file_path}
+//   echo "SQL_INSTANCE=${google_sql_database_instance.cloudsql_instance.name}" >> ${local.env_file_path}
+//   echo "PUBSUB_TOPIC=${google_pubsub_topic.verify_email.name}" >> ${local.env_file_path}
+//   sudo chown -R csye6225:csye6225 /tmp/webapp/webapp.env
+//   sudo chmod 644 /tmp/webapp/webapp.env
+
+//   # indicator file to indicate the success of the startup script
+//   touch /tmp/success-indicator-file
+//   sudo systemctl restart csye6225.service
+
+//   EOF
+
+//   service_account {
+//     email  = google_service_account.vm_service_account.email
+//     scopes = ["cloud-platform"]
+//   }
+
+//   depends_on = [google_compute_network.vpc, google_service_account.vm_service_account]
+// }
+
 resource "google_dns_record_set" "a" {
   name         = var.domain_name
   type         = "A"
   ttl          = 300
   managed_zone = var.dns_managed_zone
 
-  rrdatas = [google_compute_instance.webapp_instance.network_interface[0].access_config[0].nat_ip]
+  // rrdatas = [google_compute_instance.webapp_instance.network_interface[0].access_config[0].nat_ip]
+  rrdatas = [google_compute_global_address.default.address]
 }
-
-
-
 
 resource "google_pubsub_subscription" "email_verification" {
   name  = "email-verification"
@@ -314,7 +512,7 @@ output "db_host" {
   description = "IP address of the host running the Cloud SQL Database."
 }
 
-output "nat_ip" {
-  value       = google_compute_instance.webapp_instance.network_interface[0].access_config[0].nat_ip
-  description = "The public IP address of the webapp instance."
-}
+// output "nat_ip" {
+//   value       = google_compute_instance.webapp_instance.network_interface[0].access_config[0].nat_ip
+//   description = "The public IP address of the webapp instance."
+// }

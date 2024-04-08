@@ -60,3 +60,6 @@ variable "object_name" {}
 variable "mailgun_api_key" {}
 variable "pubsub_topic" {}
 variable "mailgun_domain" {}
+variable "compute_health_check_name" {}
+variable "backend_protocol" {}
+variable "igm_port_name" {}
