@@ -253,7 +253,6 @@ resource "google_compute_health_check" "http_health_check" {
     port               = 5000
     port_specification = "USE_FIXED_PORT"
     request_path       = "/healthz"
-    response           = "I AM HEALTHY"
   }
 }
 
@@ -305,7 +304,7 @@ resource "google_compute_region_autoscaler" "autoscaler" {
   autoscaling_policy {
     max_replicas    = 6
     min_replicas    = 1
-    cooldown_period = 60
+    cooldown_period = 300
 
     cpu_utilization {
       target = 0.05
