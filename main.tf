@@ -173,8 +173,20 @@ resource "google_project_iam_member" "cloud_kms" {
   member  = "serviceAccount:${google_service_account.vm_service_account.email}"
 }
 
-resource "google_kms_crypto_key_iam_member" "crypto_key" {
-  crypto_key_id = google_kms_crypto_key.example_key.id
+resource "google_kms_crypto_key_iam_member" "crypto_key_instance" {
+  crypto_key_id = google_kms_crypto_key.compute_instance_key.id
+  role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
+  member        = "serviceAccount:${google_service_account.vm_service_account.email}"
+}
+
+resource "google_kms_crypto_key_iam_member" "crypto_key_sql" {
+  crypto_key_id = google_kms_crypto_key.sql_instance_key.id
+  role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
+  member        = "serviceAccount:${google_service_account.vm_service_account.email}"
+}
+
+resource "google_kms_crypto_key_iam_member" "crypto_key_bucket" {
+  crypto_key_id = google_kms_crypto_key.bucket_key.id
   role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
   member        = "serviceAccount:${google_service_account.vm_service_account.email}"
 }
@@ -185,7 +197,7 @@ resource "google_sql_database_instance" "cloudsql_instance" {
   region              = var.region
   project             = var.project_id
   deletion_protection = false
-  encryption_key_name = google_kms_crypto_key.sql_instance_key.self_link
+  encryption_key_name = google_kms_crypto_key.sql_instance_key.id
 
   settings {
     tier              = var.db_tier
@@ -237,6 +249,9 @@ resource "google_compute_region_instance_template" "instance_template" {
     mode         = "READ_WRITE"
     disk_type    = "pd-balanced"
     disk_size_gb = 30
+    disk_encryption_key {
+      kms_key_self_link = google_kms_crypto_key.compute_instance_key.id
+    }
   }
 
   network_interface {
@@ -246,10 +261,6 @@ resource "google_compute_region_instance_template" "instance_template" {
     stack_type         = "IPV4_ONLY"
     access_config {
     }
-  }
-
-  disk_encryption_key {
-    kms_key_self_link = google_kms_crypto_key.compute_instance_key.self_link
   }
 
   metadata_startup_script = <<EOF
