@@ -78,18 +78,18 @@ resource "google_compute_firewall" "block_ssh" {
 }
 
 # firewall rule for webapp subnet to allow traffic on a specific port
-resource "google_compute_firewall" "webapp_firewall" {
-  name    = "allow-webapp-traffic"
-  network = google_compute_network.vpc.self_link
+// resource "google_compute_firewall" "webapp_firewall" {
+//   name    = "allow-webapp-traffic"
+//   network = google_compute_network.vpc.self_link
 
-  allow {
-    protocol = "tcp"
-    ports    = ["5000"]
-  }
+//   allow {
+//     protocol = "tcp"
+//     ports    = ["5000"]
+//   }
 
-  source_ranges = ["${var.webapp_subnet_dest_range}"]
-  target_tags   = ["webapp"]
-}
+//   source_ranges = ["${var.webapp_subnet_dest_range}"]
+//   target_tags   = ["webapp"]
+// }
 
 // resource "google_compute_subnetwork" "proxy_only" {
 //   name          = "proxy-only-subnet"
@@ -105,7 +105,7 @@ resource "google_compute_firewall" "lb_firewall" {
 
   allow {
     protocol = "tcp"
-    ports    = ["80", "443", "8080", "5000"]
+    ports    = ["5000"]
   }
 
   network       = google_compute_network.vpc.id
@@ -190,17 +190,17 @@ resource "google_sql_user" "db_user" {
 resource "google_compute_region_instance_template" "instance_template" {
   name = "webapp-instance-template"
 
-  tags         = ["webapp"]
+  tags         = ["load-balanced-backend"]
   machine_type = var.compute_instance_machine_type
 
   // Create a new boot disk from an image
   disk {
-    source_image      = "${var.project_id}/csye6225-app-image"
-    auto_delete       = true
-    boot              = true
-    mode              = "READ_WRITE"
-    disk_type         = "pd-balanced"
-    disk_size_gb      = 100
+    source_image = "${var.project_id}/csye6225-app-image"
+    auto_delete  = true
+    boot         = true
+    mode         = "READ_WRITE"
+    disk_type    = "pd-balanced"
+    disk_size_gb = 30
   }
 
   network_interface {
@@ -244,17 +244,15 @@ resource "google_compute_health_check" "http_health_check" {
   name        = var.compute_health_check_name
   description = "Health check via http"
 
-  timeout_sec         = 1
-  check_interval_sec  = 1
-  healthy_threshold   = 4
-  unhealthy_threshold = 5
+  timeout_sec         = 8
+  check_interval_sec  = 8
+  healthy_threshold   = 2
+  unhealthy_threshold = 2
 
   http_health_check {
     port               = 5000
     port_specification = "USE_FIXED_PORT"
     request_path       = "/healthz"
-    proxy_header       = "NONE"
-    response           = "I AM HEALTHY"
   }
 }
 
@@ -273,9 +271,9 @@ resource "google_compute_health_check" "http_health_check" {
 resource "google_compute_region_instance_group_manager" "appserver" {
   name = "appserver-igm"
 
-  base_instance_name        = "app"
-  region                    = var.region
-  distribution_policy_zones = ["us-east1-b"]
+  base_instance_name = "app"
+  region             = var.region
+  wait_for_instances = true
 
   version {
     name              = "appserver-canary"
@@ -283,7 +281,7 @@ resource "google_compute_region_instance_group_manager" "appserver" {
   }
 
   // target_pools = [google_compute_target_pool.target_pool.id]
-  // target_size  = 2
+  // target_size = null
 
   named_port {
     name = var.igm_port_name
@@ -294,6 +292,8 @@ resource "google_compute_region_instance_group_manager" "appserver" {
     health_check      = google_compute_health_check.http_health_check.id
     initial_delay_sec = 300
   }
+
+  depends_on = [google_compute_region_instance_template.instance_template]
 }
 
 resource "google_compute_region_autoscaler" "autoscaler" {
@@ -302,12 +302,12 @@ resource "google_compute_region_autoscaler" "autoscaler" {
   target = google_compute_region_instance_group_manager.appserver.id
 
   autoscaling_policy {
-    max_replicas    = 5
+    max_replicas    = 6
     min_replicas    = 1
-    cooldown_period = 60
+    cooldown_period = 300
 
     cpu_utilization {
-      target = 0.5
+      target = 0.05
     }
   }
 
@@ -323,18 +323,15 @@ resource "google_compute_managed_ssl_certificate" "ssl_cert" {
 }
 
 resource "google_compute_backend_service" "lb_backend_service" {
-  name      = "lb-backend-service"
-  protocol  = var.backend_protocol
-  port_name = var.igm_port_name
+  name                  = "lb-backend-service"
+  protocol              = var.backend_protocol
+  port_name             = var.igm_port_name
+  load_balancing_scheme = "EXTERNAL_MANAGED"
 
   health_checks = [google_compute_health_check.http_health_check.id]
 
   backend {
     group = google_compute_region_instance_group_manager.appserver.instance_group
-  }
-
-  log_config {
-    enable = true
   }
 }
 
@@ -351,12 +348,14 @@ resource "google_compute_target_https_proxy" "default" {
   name             = "l7-xlb-proxy"
   url_map          = google_compute_url_map.demo_url_map.id
   ssl_certificates = [google_compute_managed_ssl_certificate.ssl_cert.id]
+
+  depends_on = [google_compute_managed_ssl_certificate.ssl_cert]
 }
 
 resource "google_compute_global_forwarding_rule" "https_forwarding_rule" {
   name                  = "l7-xlb-forwarding-rule"
-  // ip_protocol           = "TCP"
-  // load_balancing_scheme = "EXTERNAL"
+  ip_protocol           = "TCP"
+  load_balancing_scheme = "EXTERNAL_MANAGED"
   port_range            = "443"
   target                = google_compute_target_https_proxy.default.id
   ip_address            = google_compute_global_address.default.id

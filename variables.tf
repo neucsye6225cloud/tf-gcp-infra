@@ -3,7 +3,7 @@ variable "project_id" {
 }
 
 variable "region" {
-  default = "us-east1"
+  default = "us-central1"
 }
 
 variable "vpc_name" {
