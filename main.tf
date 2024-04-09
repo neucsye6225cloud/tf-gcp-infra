@@ -5,6 +5,29 @@ locals {
   env_file_path = "/tmp/webapp/webapp.env"
 }
 
+resource "google_kms_key_ring" "keyring" {
+  name     = "test-keyring"
+  location = var.region
+}
+
+resource "google_kms_crypto_key" "compute_instance_key" {
+  name            = "compute-instance-key"
+  key_ring        = google_kms_key_ring.keyring.id
+  rotation_period = var.key_rotation_period
+}
+
+resource "google_kms_crypto_key" "sql_instance_key" {
+  name            = "sql-instance-key"
+  key_ring        = google_kms_key_ring.keyring.id
+  rotation_period = var.key_rotation_period
+}
+
+resource "google_kms_crypto_key" "bucket_key" {
+  name            = "bucket-key"
+  key_ring        = google_kms_key_ring.keyring.id
+  rotation_period = var.key_rotation_period
+}
+
 # random password generator resource
 resource "random_password" "password" {
   length           = 16
@@ -144,12 +167,25 @@ resource "google_project_iam_member" "pubsub_publisher_binding" {
   member  = "serviceAccount:${google_service_account.vm_service_account.email}"
 }
 
+resource "google_project_iam_member" "cloud_kms" {
+  project = var.project_id
+  role    = "roles/cloudkms.admin"
+  member  = "serviceAccount:${google_service_account.vm_service_account.email}"
+}
+
+resource "google_kms_crypto_key_iam_member" "crypto_key" {
+  crypto_key_id = google_kms_crypto_key.example_key.id
+  role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
+  member        = "serviceAccount:${google_service_account.vm_service_account.email}"
+}
+
 # a cloud SQL instance
 resource "google_sql_database_instance" "cloudsql_instance" {
   database_version    = var.db_version
   region              = var.region
   project             = var.project_id
   deletion_protection = false
+  encryption_key_name = google_kms_crypto_key.sql_instance_key.self_link
 
   settings {
     tier              = var.db_tier
@@ -210,6 +246,10 @@ resource "google_compute_region_instance_template" "instance_template" {
     stack_type         = "IPV4_ONLY"
     access_config {
     }
+  }
+
+  disk_encryption_key {
+    kms_key_self_link = google_kms_crypto_key.compute_instance_key.self_link
   }
 
   metadata_startup_script = <<EOF
