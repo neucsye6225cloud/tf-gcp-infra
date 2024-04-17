@@ -1,8 +1,42 @@
+data "google_project" "current" {
+  project_id = var.project_id
+}
+
 # local variables
 locals {
-  timestamp     = formatdate("DDMMMYYYYhhmm", timestamp())
-  db_host       = google_sql_database_instance.cloudsql_instance.ip_address[0].ip_address
-  env_file_path = "/tmp/webapp/webapp.env"
+  timestamp                     = formatdate("DDMMMYYYYhhmm", timestamp())
+  db_host                       = google_sql_database_instance.cloudsql_instance.ip_address[0].ip_address
+  env_file_path                 = "/tmp/webapp/webapp.env"
+  cloud_storage_service_account = "service-${data.google_project.current.number}@gs-project-accounts.iam.gserviceaccount.com"
+}
+
+resource "google_project_service_identity" "gcp_sa_cloud_sql" {
+  provider = google-beta
+  service  = "sqladmin.googleapis.com"
+  project  = var.project_id
+}
+
+resource "google_kms_key_ring" "keyring" {
+  name     = "test-keyring"
+  location = var.region
+}
+
+resource "google_kms_crypto_key" "compute_instance_key" {
+  name            = "compute-instance-key"
+  key_ring        = google_kms_key_ring.keyring.id
+  rotation_period = var.key_rotation_period
+}
+
+resource "google_kms_crypto_key" "sql_instance_key" {
+  name            = "sql-instance-key"
+  key_ring        = google_kms_key_ring.keyring.id
+  rotation_period = var.key_rotation_period
+}
+
+resource "google_kms_crypto_key" "bucket_key" {
+  name            = "bucket-key"
+  key_ring        = google_kms_key_ring.keyring.id
+  rotation_period = var.key_rotation_period
 }
 
 # random password generator resource
@@ -144,12 +178,46 @@ resource "google_project_iam_member" "pubsub_publisher_binding" {
   member  = "serviceAccount:${google_service_account.vm_service_account.email}"
 }
 
+resource "google_project_iam_member" "cloud_kms" {
+  project = var.project_id
+  role    = "roles/cloudkms.admin"
+  member  = "serviceAccount:${google_service_account.vm_service_account.email}"
+}
+
+resource "google_kms_crypto_key_iam_binding" "crypto_key" {
+  crypto_key_id = google_kms_crypto_key.sql_instance_key.id
+  role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
+  members = [
+    "serviceAccount:${google_project_service_identity.gcp_sa_cloud_sql.email}",
+  ]
+}
+
+resource "google_kms_crypto_key_iam_binding" "crypto_vm_key" {
+  provider      = google-beta
+  crypto_key_id = google_kms_crypto_key.compute_instance_key.id
+  role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
+  members = [
+    "serviceAccount:${data.google_project.current.number}@cloudservices.gserviceaccount.com",
+    "serviceAccount:${data.google_project.current.number}-compute@developer.gserviceaccount.com",
+  "serviceAccount:service-${data.google_project.current.number}@compute-system.iam.gserviceaccount.com"]
+}
+
+resource "google_kms_crypto_key_iam_binding" "project" {
+  provider      = google-beta
+  crypto_key_id = google_kms_crypto_key.bucket_key.id
+  role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
+  members = [
+    "serviceAccount:service-${data.google_project.current.number}@gs-project-accounts.iam.gserviceaccount.com"
+  ]
+}
+
 # a cloud SQL instance
 resource "google_sql_database_instance" "cloudsql_instance" {
   database_version    = var.db_version
   region              = var.region
   project             = var.project_id
   deletion_protection = false
+  encryption_key_name = google_kms_crypto_key.sql_instance_key.id
 
   settings {
     tier              = var.db_tier
@@ -201,6 +269,9 @@ resource "google_compute_region_instance_template" "instance_template" {
     mode         = "READ_WRITE"
     disk_type    = "pd-balanced"
     disk_size_gb = 30
+    disk_encryption_key {
+      kms_key_self_link = google_kms_crypto_key.compute_instance_key.id
+    }
   }
 
   network_interface {
@@ -256,18 +327,6 @@ resource "google_compute_health_check" "http_health_check" {
   }
 }
 
-// resource "google_compute_target_pool" "target_pool" {
-//   name = "instance-pool"
-
-//   instances = [
-//     "${google_compute_region_instance_template.instance_template.self_link_unique}",
-//   ]
-
-//   health_checks = [
-//     google_compute_health_check.http_health_check.name,
-//   ]
-// }
-
 resource "google_compute_region_instance_group_manager" "appserver" {
   name = "appserver-igm"
 
@@ -279,9 +338,6 @@ resource "google_compute_region_instance_group_manager" "appserver" {
     name              = "appserver-canary"
     instance_template = google_compute_region_instance_template.instance_template.id
   }
-
-  // target_pools = [google_compute_target_pool.target_pool.id]
-  // target_size = null
 
   named_port {
     name = var.igm_port_name
